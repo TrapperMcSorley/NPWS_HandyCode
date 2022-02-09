@@ -1,0 +1,328 @@
+---
+title: "Convert Image data to table of detections"
+output: html_notebook
+version: 2.0
+---
+
+some introduction about the script
+
+Load libraries
+
+```{r}
+
+# libraries ---------------------------------------------------------------
+library(fs)
+library(dplyr)
+library(stringr)
+#library(data.table)
+```
+
+------------------------------------------------------------------------
+
+## Setting up folder paths and inputs
+
+### inputs
+
+You'll need to change the **New_data_folder** path to the folder where the image data is stored. Choose the folder not the file.
+
+The image data needs to be in the format output from the **Exif Extraction_byfolder_v5.R** script.
+
+```{r}
+New_data_folder <- c("X:/OEH SOS Share/Pests/10.DataAnalysis/10.1 Data Processing/Image text files/Nungar_20210520/")
+
+Site_data_path <- "c:/Users/mahonp/DPIE/MST_NPWS_Vertebrate pest monitoring - General/3.0 Power BI data/3.2 Formated logs/start_end_dates.csv"
+
+Site_data <- read.csv(Site_data_path)
+
+```
+
+### species of interest
+
+*What species are you interested in?*\
+The list **Species_of_interest** is used to search the "keyword" field in the images metadata, the place where tags are saved when tagging images. This field is searched for any matching text. Choose your search text wisely as it can cause problems. e.g. searching for "pig" will return images tagged with "pigeon" A long and Short format .csv file is created for each entry in **species_of_interest**.
+
+```{r}
+Species_of_interest <-
+  c("Felis catus" ,
+    "fox" ,
+    "dog",
+    "goat" ,
+    "Sus scrofa" ,
+    "deer",
+    "rock-wallaby", 
+    "koala")
+```
+
+### Start night
+
+the date the first camera was deployed at Big Yengo National Park is the referance point for the nights since depoyment for all cameras. This is handy to use instead of date in trent analysis.
+
+```{r}
+Time_zone <-  "Australia/Brisbane"
+start_date <- as.POSIXct("2016-08-16" , tz = Time_zone)
+```
+
+### existing species detection tables
+
+If you are adding data to an existing station detection.csv add the file path of the existing data to **Existing_data_path**. If this is he first time running the script (to create a new set of species detection tables) then leave **Existing_data_path** as "" Also, set the out directory, this can be the same as the Existing dir, in which case the old data will be archived before writing the new data. NOTE: if you are generating data to append to the existing data then use the same list of **speices_of_interst** that was originally use, otherwise you may have missed some detection in previous extractions. We'll set a *true* or *false* flag to see if there is existing data to use latter on.
+
+```{r}
+#leave this as "" if its the first time creating species detection tables.
+#Otherwise, use the file path of the current Station detections.csv.
+Existing_data_path <- "C:/Users/mahonp/DPIE/MST_NPWS_Vertebrate pest monitoring - General/3.0 Power BI data/3.1 Detection tables/Stations_detections.csv"
+ 
+out_dir <- "C:/Users/mahonp/DPIE/MST_NPWS_Vertebrate pest monitoring - General/3.0 Power BI data/3.1 Detection tables"
+
+#if data exists
+    ExistingData <- file.exists(Existing_data_path)
+    ExistingData
+```
+
+------------------------------------------------------------------------
+
+### **there are no more inputs needed from this point** *(assuming everything works)*
+
+------------------------------------------------------------------------
+
+### Create some functions
+
+This sanatises the camera statonID so that it has capital letters and 3 numbers. Portion 78 is an exception because it has digits in the alpha part of the stationID.
+
+```{r}
+#sanatise stationIDs 
+    MakeStationID <- function(station){
+      ID <- data.frame(ID =  gsub( " ", "" , toupper(station)))
+      ID$num <- NA
+      ID$Subs <- NA
+      ID$num[substr(ID$ID , 1,3) == "P78"] <- str_pad(gsub("P78", "" , ID$ID[substr(ID$ID , 1,3) == "P78"]),3,pad = "0")
+      ID$num[!substr(ID$ID , 1,3) == "P78"] <- str_pad(gsub("[[:alpha:]]", "" , ID$ID[!substr(ID$ID , 1,3) == "P78"]),3,pad = "0")
+      ID$Subs[substr(ID$ID , 1,3) == "P78"] <- "P78"
+      ID$Subs[!substr(ID$ID , 1,3) == "P78"] <- gsub("[[:digit:]]", "" , ID$ID[!substr(ID$ID , 1,3) == "P78"])
+      ID$station <- paste0(ID$Subs , ID$num)
+      return(ID$station)
+    }
+```
+
+------------------------------------------------------------------------
+
+## Importing data
+
+### read in image data files
+
+Read in all *.csv* files from **New_data_folder** and bind them together into one data frame called **ImageData**. There is some **IF** statements to check some of the formatting of the csv to make sure this works with the old formats with slightly different column names and formats.
+
+```{r}
+#function to read and fix old format data
+  myReadImageCSV <- function(csvfile){
+    temp1 <- read.csv(csvfile , stringsAsFactors = FALSE)
+    
+    #fix old  data where keywords are split
+    if(is.null(temp1$Keywords)){
+      temp1$Keywords <-  paste(temp1$Tag1,temp1$Tag2,temp1$Tag3,temp1$Tag4,temp1$Tag5 , sep = ",")
+    } 
+    #Make sure the file name is split so we can extract the stationID
+    if (is.null(temp1$V2)) {
+      Siteinfo <- as.data.frame(str_split(path_ext_remove(temp1$FileName) , pattern = "_" , simplify = TRUE ))
+      temp1 <- cbind(temp1 , Siteinfo)
+    }
+    #output progress to the console
+    cat("\n" , "Imported: " , path_file(csvfile) ,  " Length: " , length(temp1[,1]))
+    return(temp1)
+  }
+#clean up
+  rm(temp1)
+  
+ ImageData <- bind_rows(lapply(dir_ls(New_data_folder , type = "any" , glob = "*.csv" , recurse = TRUE),
+                 myReadImageCSV))
+
+ colnames(ImageData)[colnames(ImageData) == "V2"] <- "stationID"
+ 
+  #filter out NAs
+ ImageData <- ImageData[!is.na(ImageData$SourceFile),]
+
+ #sanatise the stationID
+ ImageData$stationID <- MakeStationID(ImageData$stationID)
+```
+
+------------------------------------------------------------------------
+
+## Formatting the data
+
+### format the dates
+
+change the dates from text to system recognised dates. Always use Brisbane as the time zone so we don't need to deal with daylight savings shenanigans
+
+We need to remove all the entries without a date time stamp before we format the image data. Then we need to format the dates a few different ways because strange things happen if the *.csv* files have been opens in MS Excel.
+
+```{r}
+  Sys.Date()
+  ImageData <- ImageData %>% filter(!is.na(CreateDate))
+  ImageData$posix <- as.POSIXct(ImageData$CreateDate , "%Y-%m-%d %H:%M:%S" ,  tz = "Australia/Brisbane")
+  
+  ImageData$posix[is.na(ImageData$posix)] <- as.POSIXct(ImageData$CreateDate[is.na(ImageData$posix)] , "%d/%m/%Y %H:%M:%S" ,  tz = "Australia/Brisbane")
+  
+  ImageData$posix[is.na(ImageData$posix)] <- as.POSIXct(ImageData$CreateDate[is.na(ImageData$posix)] , "%Y/%m/%d %H:%M:%S" ,  tz = "Australia/Brisbane")
+  
+  ImageData$posix[is.na(ImageData$posix)] <- as.POSIXct(ImageData$CreateDate[is.na(ImageData$posix)] , "%d/%m/%Y %H:%M" ,  tz = "Australia/Brisbane")
+```
+
+Now we'll use the the **start_date** to create a universal day and night variable. The night is a 12 hour period from midday to midday. To mkae this we add 12 hours to **start_date**. Minus this from all the dates to find the decimal differance in days, then round down.
+
+```{r}
+  
+  startnight <- start_date + 12 *60 *60 #add 12 hours to start day
+  ImageData$night <- as.integer(ceiling(difftime(ImageData$posix , startnight , units = "days")))
+  
+```
+
+------------------------------------------------------------------------
+
+# Creating Detection Table
+
+### functions to create the detection table
+
+the first bit of this function (before the line) returns a list of the species tags that will be extracted. if these pick up the wrong tags you'll need to amend the **species_of_interest** and re-run to this point. Then a dateframe of detections is created. This is binary, so it records detections as 1s. This part of the code can be used latter to introduce other calculations of activity.
+
+```{r}
+myMatrix <- function(mdf , MyAnimal){
+    #progress tracking
+    flush.console()
+    cat("\n***" ,MyAnimal , "***")
+    cat("\nUseing these tags for detection:-\n")
+    
+    #print all unique tags used
+    tags.found <- list()
+    tags <- data.frame(str_split(mdf$Keywords , "," , simplify = TRUE) , stringsAsFactors = FALSE)
+    for (i in 1:length(tags)){
+      tags.found[[i]] <- unique(tags[grepl( MyAnimal ,tags[,i] , ignore.case = TRUE),i])
+    }
+    cat(paste(unique(unlist(tags.found)), collapse = "\n"))
+    #_________________________________________________________________________
+    
+    #create data frame of nights detected
+    
+    detection_df <- mdf %>%
+      filter(grepl(pattern = MyAnimal , Keywords , ignore.case = TRUE))
+    
+    #make sure the filter df has data
+    if (length(detection_df[,1])>0){
+        detection_df <- detection_df %>% 
+          mutate(detection = 1 , Species = MyAnimal) %>% 
+          group_by(stationID , night, Species) %>% 
+          #summarise turns all the detection into a single binary detection
+          #change this bit of code to use different methods of calculating activity.
+          summarise(detection = 1) %>%
+          select(stationID , detection , night , Species)
+    } else {
+      #need to select() empty data to remove columns
+      detection_df <- detection_df %>%
+          select(stationID , night )
+    }
+    
+    
+    return(detection_df)
+  }
+```
+
+### call the function
+
+call the function to create the matrix, once for each species. results are stored as a list of data frames
+
+```{r}
+print(Sys.Date())
+options("dplyr.summarise.inform" = FALSE)
+station_day_species_detections <- bind_rows(lapply(Species_of_interest , FUN = myMatrix, mdf = ImageData))
+```
+
+split data for stations with no logged service or deployment dates
+
+```{r}
+no_station_detections <- station_day_species_detections %>%
+  filter(!stationID %in% Site_data$stationID)
+
+station_day_species_detections <- station_day_species_detections %>% filter(stationID %in% Site_data$stationID)
+
+```
+
+now if there is existing data, then append the new data to the old. Using *unique()* to the end to make sure we are including duplicate defections from merging the same data set more than once.
+
+```{r , warning=FALSE , message =FALSE, error=FALSE}
+print(Sys.Date())
+if (ExistingData){
+  
+  Existing_df <- read.csv(Existing_data_path , row.names = NULL)
+  
+  station_day_species_detections <- Existing_df %>%
+    bind_rows(station_day_species_detections) %>% 
+    select(stationID , detection , night , Species) %>% 
+    unique()
+}
+```
+
+------------------------------------------------------------------------
+
+## Save the data
+
+### archive the existing data
+
+we cant rename more than 5 images on the DPIE server so instead we'll create a folder with today's date and put all the existing data into that.
+
+```{r}
+if (ExistingData){
+  datestamp <- strftime(Sys.time() , format = "%Y%m%d%H%M")
+  #create the archive folder if it doesn't exist
+  dir_create(path_join(c(path_dir(Existing_data_path) , "archive")))
+  #create a sub folder for the date
+  destination <- dir_create(path_join(c(path_dir(Existing_data_path) , "archive", paste0("stations_det_",datestamp ))))
+                            
+  
+  file_path_new <- path_join(c(destination, basename(Existing_data_path))) 
+  file_copy(Existing_data_path , file_path_new)
+  file_delete(Existing_data_path)
+}
+
+
+```
+
+save the no stations detection
+
+```{r}
+
+no_detection_path <- path_join(c(path_dir(Existing_data_path), "no_stations_detections.csv"))
+#check to see if any no-station detection are i this data set
+if(nrow(no_station_detections) > 0 ){
+  cat("These stations are not in the deployment log but are in the imported image data: \n")
+  cat(unique(no_station_detections$stationID))
+  #check if there is already a a file called "no_stations_detections.csv"
+  #if there is then add in the new data
+  if (file_exists(no_detection_path)){
+      Existing_no_stations <- read.csv(no_detection_path , row.names = NULL)[,-1]
+    
+      no_station_detections <- Existing_no_stations %>%
+        bind_rows(no_station_detections) %>% 
+        select(stationID , detection , night , Species) %>% 
+        unique()
+      
+      # archive the old no stations data
+      file_path_new <- path_join(c(destination, basename(no_detection_path))) 
+      file_copy(no_detection_path , file_path_new)
+      file_delete(no_detection_path)
+  }
+  
+  #save the data
+  write.csv(x=no_station_detections,
+          file = no_detection_path)
+}
+
+```
+
+### save the data frame
+
+```{r}
+
+write.csv(x=station_day_species_detections,
+          file = Existing_data_path)
+
+```
+
+# The End
